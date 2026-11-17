@@ -13,3 +13,127 @@ library(rvest)
 library(httr2)
 library(purrr)
 ```
+
+```{r}
+imdb_snapshots <- read_rds("data/imdb_snapshots.rds")
+
+imdb_snapshots
+
+imdb_snapshots |>
+  count(snap_year)
+```
+
+```{r}
+#| eval: false
+urls <- c(
+  "https://web.archive.org/web/20150101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20170101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20190101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20210101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20220201012049/https://www.imdb.com/chart/top/"
+)
+
+snap_years <- c(2015, 2017, 2019, 2021, 2022)
+
+scrape_snapshot <- function(url, snap_year) {
+  html <- request(url) |>
+    req_user_agent("r4ds-student-project") |>
+    req_throttle(rate = 30 / 60) |>
+    req_retry(max_tries = 3, retry_on_failure = TRUE) |>
+    req_perform() |>
+    resp_body_html()
+
+  tibble(
+    snap_year = snap_year,
+    rank = html |>
+      html_elements("td.titleColumn") |>
+      html_text2() |>
+      str_extract("^\\d+") |>
+      as.integer(),
+    title = html |>
+      html_elements("td.titleColumn a") |>
+      html_text2(),
+    year = html |>
+      html_elements("td.titleColumn span.secondaryInfo") |>
+      html_text2() |>
+      str_extract("\\d{4}") |>
+      as.integer(),
+    rating = html |>
+      html_elements("td.imdbRating strong") |>
+      html_text2() |>
+      as.numeric(),
+    number = html |>
+      html_elements("td.imdbRating strong") |>
+      html_attr("title") |>
+      str_extract("(?<=based on )[0-9,]+") |>
+      parse_number()
+  )
+}
+
+imdb_snapshots <- map2(urls, snap_years, scrape_snapshot) |>
+  list_rbind()
+```
+
+```{r}
+rank_changes <- imdb_snapshots |>
+  filter(snap_year %in% c(2015, 2022)) |>
+  select(title, year, snap_year, rank) |>
+  pivot_wider(
+    names_from = snap_year,
+    values_from = rank,
+    names_prefix = "rank_"
+  ) |>
+  drop_na(rank_2015, rank_2022) |>
+  mutate(
+    rank_change = rank_2015 - rank_2022,
+    decade = (year %/% 10) * 10
+  )
+
+rank_changes |>
+  slice_max(abs(rank_change), n = 10)
+```
+
+```{r}
+rank_changes |>
+  summarize(
+    avg_rank_change = mean(rank_change),
+    n_films = n(),
+    .by = decade
+  ) |>
+  arrange(decade)
+```
+
+```{r}
+film_counts <- imdb_snapshots |>
+  count(title, year, name = "n_snapshots")
+
+film_counts |>
+  count(n_snapshots, name = "n_films")
+```
+
+```{r}
+rank_changes |>
+  summarize(
+    avg_rank_change = mean(rank_change),
+    .by = decade
+  ) |>
+  arrange(decade) |>
+  mutate(
+    decade_label = fct_inorder(paste0(decade, "s")),
+    direction = if_else(avg_rank_change > 0, "Rose", "Fell")
+  ) |>
+  ggplot(aes(x = avg_rank_change, y = decade_label, fill = direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray30") +
+  scale_fill_manual(values = c("Fell" = "#d95f02", "Rose" = "#1b9e77")) +
+  labs(
+    title = "Older Films Lost Ground on the IMDb Top 250 (2015–2022)",
+    subtitle = "Only 1990s films rose on average, while 1930s and 1940s classics dropped over 30 spots",
+    x = "Average Rank Change (Positive = Rose Toward #1)",
+    y = "Release Decade",
+    fill = "Rank Direction",
+    caption = "Source: IMDb Top 250 via Wayback Machine (190 films appearing in both 2015 and 2022 snapshots)."
+  ) +
+  theme_minimal()
+```
+
